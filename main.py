@@ -40,16 +40,6 @@ CODEX_AUTH   = Path.home() / ".codex" / "auth.json"
 GEMINI_AUTH     = Path.home() / ".gemini" / "oauth_creds.json"
 GEMINI_ACCTS    = Path.home() / ".gemini" / "google_accounts.json"
 GEMINI_CLI_BUNDLE = Path.home() / "AppData" / "Roaming" / "npm" / "node_modules" / "@google" / "gemini-cli" / "bundle"
-GEMINI_SHOW_MODELS = [
-    "gemini-3.1-pro-preview",
-    "gemini-3-pro-preview",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-]
-
 # ─── Catppuccin Mocha ────────────────────────────────────
 
 C = {
@@ -434,16 +424,16 @@ def fetch_gemini_profile():
 def fetch_gemini_quota():
     creds = load_gemini_creds()
     if not creds:
-        return None
+        return {"_error": "OAuth credentials not found or refresh failed"}
     token = creds.get("access_token", "")
     if not token:
-        return None
+        return {"_error": "OAuth access token is missing"}
 
     if _in_cooldown("gemini_quota"):
         wait = int(_cooldown["gemini_quota"] - datetime.now().timestamp())
         if "gemini_quota" in _cache:
             return {**_cache["gemini_quota"], "_cached": True, "_wait": wait}
-        return None
+        return {"_error": f"Rate limited, retry in {wait}s", "_wait": wait}
 
     try:
         headers = {"Authorization": f"Bearer {token}",
@@ -464,9 +454,9 @@ def fetch_gemini_quota():
     except urllib.error.HTTPError as e:
         if e.code == 429:
             _set_cooldown("gemini_quota", int(e.headers.get("retry-after", 3600)))
-        return None
-    except Exception:
-        return None
+        return {"_error": f"HTTP {e.code} from Code Assist quota API", "_http": e.code}
+    except Exception as e:
+        return {"_error": f"{type(e).__name__}: {e}"}
 
 
 def _gemini_post(method, body, headers):
@@ -521,15 +511,22 @@ def _gemini_pooled_quota(quota, tier):
 class Fetcher(QObject):
     done = Signal(dict)
 
+    def __init__(self, services=None):
+        super().__init__()
+        self.services = set(services or ("claude", "codex", "gemini"))
+
     def run(self):
-        self.done.emit({
-            "claude_usage":   fetch_claude_usage(),
-            "claude_profile": fetch_claude_profile(),
-            "codex_profile":  fetch_codex_profile(),
-            "codex_usage":    fetch_codex_usage(),
-            "gemini_profile": fetch_gemini_profile(),
-            "gemini_quota":   fetch_gemini_quota(),
-        })
+        data = {"_services": list(self.services)}
+        if "claude" in self.services:
+            data["claude_usage"] = fetch_claude_usage()
+            data["claude_profile"] = fetch_claude_profile()
+        if "codex" in self.services:
+            data["codex_profile"] = fetch_codex_profile()
+            data["codex_usage"] = fetch_codex_usage()
+        if "gemini" in self.services:
+            data["gemini_profile"] = fetch_gemini_profile()
+            data["gemini_quota"] = fetch_gemini_quota()
+        self.done.emit(data)
 
 
 # ─── Tray icon ───────────────────────────────────────────
@@ -674,8 +671,11 @@ class MainWindow(QWidget):
         self._anchor_corner = "br"
         self._layout_signature = None
         self._data: dict = {}
+        self._loading_services = set()
 
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowTitle("AI Usage Monitor")
+        self.setWindowIcon(make_tray_icon())
         self.setAttribute(Qt.WA_NoSystemBackground)
         self.setWindowOpacity(0.95)
 
@@ -734,9 +734,9 @@ class MainWindow(QWidget):
         self._cb_claude = ToggleBtn("Claude Code", C["green"])
         self._cb_codex  = ToggleBtn("Codex",       C["teal"])
         self._cb_gemini = ToggleBtn("Gemini",      C["yellow"])
-        self._cb_claude.toggled.connect(lambda _: self._render_layout_changed())
-        self._cb_codex.toggled.connect(lambda _: self._render_layout_changed())
-        self._cb_gemini.toggled.connect(lambda _: self._render_layout_changed())
+        self._cb_claude.toggled.connect(lambda checked: self._toggle_service("claude", checked))
+        self._cb_codex.toggled.connect(lambda checked: self._toggle_service("codex", checked))
+        self._cb_gemini.toggled.connect(lambda checked: self._toggle_service("gemini", checked))
         tog_lay.addWidget(self._cb_claude)
         tog_lay.addWidget(self._cb_codex)
         tog_lay.addWidget(self._cb_gemini)
@@ -767,14 +767,21 @@ class MainWindow(QWidget):
 
     # ── Refresh ──────────────────────────────────────────
 
-    def _refresh(self):
-        self._fetcher = Fetcher()
+    def _refresh(self, services=None):
+        services = list(services or self._visible_services())
+        if not services:
+            return
+        self._loading_services.update(services)
+        self._render_layout_changed()
+        self._fetcher = Fetcher(services)
         self._thread  = threading.Thread(target=self._fetcher.run, daemon=True)
         self._fetcher.done.connect(self._on_data)
         self._thread.start()
 
     def _on_data(self, data: dict):
-        self._data = data
+        services = set(data.pop("_services", []))
+        self._loading_services.difference_update(services)
+        self._data.update(data)
         self._render()
         now = datetime.now().strftime("%H:%M")
         nxt = (datetime.now() + timedelta(milliseconds=REFRESH_MS)).strftime("%H:%M")
@@ -785,6 +792,30 @@ class MainWindow(QWidget):
     def _render_layout_changed(self):
         self._layout_signature = None
         self._render()
+
+    def _visible_services(self):
+        services = []
+        if self._cb_claude.isChecked():
+            services.append("claude")
+        if self._cb_codex.isChecked():
+            services.append("codex")
+        if self._cb_gemini.isChecked():
+            services.append("gemini")
+        return services
+
+    def _toggle_service(self, service, checked):
+        self._render_layout_changed()
+        if checked and not self._service_has_data(service):
+            self._refresh([service])
+
+    def _service_has_data(self, service):
+        if service == "claude":
+            return bool(self._data.get("claude_usage") or self._data.get("claude_profile"))
+        if service == "codex":
+            return bool(self._data.get("codex_usage") or self._data.get("codex_profile"))
+        if service == "gemini":
+            return bool(self._data.get("gemini_quota") or self._data.get("gemini_profile"))
+        return False
 
     def _render(self):
         # Replace body widget wholesale — avoids deleteLater async overlap issues
@@ -836,12 +867,13 @@ class MainWindow(QWidget):
         if profile and "_error" not in profile:
             a    = profile.get("account", {})
             name = a.get("display_name") or a.get("full_name") or ""
+            email = a.get("email_address") or a.get("email") or ""
             plan = profile.get("organization", {}).get("name", "")
-            acct = name
+            acct = f"{name} - {email}" if name and email else name or email
             if plan:
                 acct += f" [{plan}]"
 
-        self._add_header("Claude Code", C["green"], acct)
+        self._add_header("Claude Code", C["green"], acct, "claude")
 
         if data is None:
             self._body.addWidget(_label("No credentials (OAuth not configured)", C["red"], 8))
@@ -878,13 +910,13 @@ class MainWindow(QWidget):
         if profile:
             name = profile.get("name", "")
             email = profile.get("email", "")
-            acct = f"{name} · {email}" if name else email
+            acct = f"{name} - {email}" if name and email else name or email
         if usage:
             plan = usage.get("rate_limits", {}).get("plan_type", "")
             if plan and plan not in acct:
                 acct += f" [{plan}]"
 
-        self._add_header("Codex", C["teal"], acct)
+        self._add_header("Codex", C["teal"], acct, "codex")
 
         if not usage:
             self._body.addWidget(_label("No recent session data", C["subtext"], 8))
@@ -922,16 +954,19 @@ class MainWindow(QWidget):
         if profile:
             name = profile.get("name", "")
             email = profile.get("email", "")
-            acct = f"{name} · {email}" if name else email
+            acct = f"{name} - {email}" if name and email else name or email
         if quota:
             tier = quota.get("_tier", "")
             if tier and tier not in acct:
                 acct += f" [{tier}]"
 
-        self._add_header("Gemini CLI", C["yellow"], acct)
+        self._add_header("Gemini CLI", C["yellow"], acct, "gemini")
 
         if not quota:
             self._body.addWidget(_label("No quota data", C["subtext"], 8))
+            return
+        if "_error" in quota:
+            self._body.addWidget(_label(f"Error: {quota['_error']}", C["red"], 8))
             return
 
         pooled = quota.get("_pooled")
@@ -947,7 +982,7 @@ class MainWindow(QWidget):
 
     # ── Widget builders ──────────────────────────────────
 
-    def _add_header(self, title: str, color: str, subtitle: str = ""):
+    def _add_header(self, title: str, color: str, subtitle: str = "", service: str | None = None):
         row = QHBoxLayout()
         row.setSpacing(6)
         row.setContentsMargins(0, 4, 0, 2)
@@ -955,6 +990,11 @@ class MainWindow(QWidget):
         if subtitle:
             row.addWidget(_label(subtitle, C["subtext"], 7))
         row.addStretch()
+        if service:
+            text = "..." if service in self._loading_services else "⟳"
+            btn = self._tbtn(f" {text} ", C["subtext"], lambda s=service: self._refresh([s]), bold=True)
+            btn.setToolTip(f"Refresh {title}")
+            row.addWidget(btn)
         self._body.addLayout(row)
 
     def _add_bar_row(self, label: str, pct: float, resets_at, color: str):
@@ -1033,7 +1073,7 @@ class MainWindow(QWidget):
             f"QMenu {{ background: {C['surface0']}; color: {C['text']}; }}"
             f"QMenu::item:selected {{ background: {C['surface1']}; }}"
         )
-        for label, corner in [("左上", "tl"), ("右上", "tr"), ("左下", "bl"), ("右下", "br")]:
+        for label, corner in [("Top Left", "tl"), ("Top Right", "tr"), ("Bottom Left", "bl"), ("Bottom Right", "br")]:
             menu.addAction(label, lambda c=corner: self._align_window(c))
         menu.exec(self._pos_btn.mapToGlobal(self._pos_btn.rect().bottomLeft()))
 
