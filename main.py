@@ -673,7 +673,13 @@ class MainWindow(QWidget):
         self._data: dict = {}
         self._loading_services = set()
 
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.FramelessWindowHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowStaysOnTopHint
+        )
         self.setWindowTitle("AI Usage Monitor")
         self.setWindowIcon(make_tray_icon())
         self.setAttribute(Qt.WA_NoSystemBackground)
@@ -1056,11 +1062,15 @@ class MainWindow(QWidget):
 
     def _toggle_pin(self):
         self._pinned = not self._pinned
-        flags = self.windowFlags()
-        self.setWindowFlags(
-            flags | Qt.WindowStaysOnTopHint if self._pinned
-            else flags & ~Qt.WindowStaysOnTopHint
+        flags = (
+            Qt.Window
+            | Qt.FramelessWindowHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinimizeButtonHint
         )
+        if self._pinned:
+            flags |= Qt.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
         self.show()
         self._pin_btn.setStyleSheet(
             f"color: {C['yellow'] if self._pinned else C['surface1']};"
