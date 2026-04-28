@@ -717,7 +717,7 @@ class MainWindow(QWidget):
 
         # Buttons: P, position menu, X.
         self._pin_btn  = self._tbtn(" P ", C["yellow"], self._toggle_pin)
-        self._pos_btn  = self._tbtn(" ▾ ", C["yellow"], self._show_position_menu, bold=True)
+        self._pos_btn  = self._tbtn(" ▾ ", C["yellow"], self._show_options_menu, bold=True)
         self._cls_btn  = self._tbtn(" X ", C["red"],    self.quit)
         for b in [self._pin_btn, self._pos_btn, self._cls_btn]:
             tb_lay.addWidget(b)
@@ -728,14 +728,7 @@ class MainWindow(QWidget):
 
         root.addWidget(self._titlebar)
 
-        # Toggle bar
-        tog = QWidget()
-        tog.setFixedHeight(24)
-        tog.setStyleSheet(f"background: {C['surface0']};")
-        tog_lay = QHBoxLayout(tog)
-        tog_lay.setContentsMargins(6, 0, 6, 0)
-        tog_lay.setSpacing(0)
-        tog_lay.addWidget(_label(" Show:", C["subtext"], 8))
+        # Visibility state, controlled from the options menu.
 
         self._cb_claude = ToggleBtn("Claude Code", C["green"])
         self._cb_codex  = ToggleBtn("Codex",       C["teal"])
@@ -743,12 +736,6 @@ class MainWindow(QWidget):
         self._cb_claude.toggled.connect(lambda checked: self._toggle_service("claude", checked))
         self._cb_codex.toggled.connect(lambda checked: self._toggle_service("codex", checked))
         self._cb_gemini.toggled.connect(lambda checked: self._toggle_service("gemini", checked))
-        tog_lay.addWidget(self._cb_claude)
-        tog_lay.addWidget(self._cb_codex)
-        tog_lay.addWidget(self._cb_gemini)
-        tog_lay.addStretch()
-        root.addWidget(tog)
-
         # Body — replaced wholesale on each render
         self._root_layout = root
         self._body_widget  = None
@@ -1077,15 +1064,42 @@ class MainWindow(QWidget):
             f"background: transparent; padding: 0 2px;"
         )
 
-    def _show_position_menu(self):
+    def _show_options_menu(self):
         menu = QMenu(self)
         menu.setStyleSheet(
             f"QMenu {{ background: {C['surface0']}; color: {C['text']}; }}"
             f"QMenu::item:selected {{ background: {C['surface1']}; }}"
         )
+
+        show_menu = menu.addMenu("Visible Tools")
+        show_menu.setStyleSheet(menu.styleSheet())
+        for label, toggle, service in [
+            ("Claude Code", self._cb_claude, "claude"),
+            ("Codex", self._cb_codex, "codex"),
+            ("Gemini", self._cb_gemini, "gemini"),
+        ]:
+            action = show_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(toggle.isChecked())
+            action.triggered.connect(
+                lambda checked, t=toggle, s=service: self._set_service_visible(t, s, checked)
+            )
+
+        pos_menu = menu.addMenu("Window Position")
+        pos_menu.setStyleSheet(menu.styleSheet())
         for label, corner in [("Top Left", "tl"), ("Top Right", "tr"), ("Bottom Left", "bl"), ("Bottom Right", "br")]:
-            menu.addAction(label, lambda c=corner: self._align_window(c))
+            pos_menu.addAction(label, lambda _checked=False, c=corner: self._align_window(c))
+
+        menu.addSeparator()
+        menu.addAction("Refresh All", lambda _checked=False: self._refresh())
         menu.exec(self._pos_btn.mapToGlobal(self._pos_btn.rect().bottomLeft()))
+
+    def _set_service_visible(self, toggle, service, checked):
+        if toggle.isChecked() == checked:
+            return
+        toggle._checked = checked
+        toggle._update()
+        self._toggle_service(service, checked)
 
     def _align_window(self, corner):
         self._anchor_corner = corner
